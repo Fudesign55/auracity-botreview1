@@ -25,9 +25,12 @@ if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
 sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 
 # =========================
-# BOT
+# BOT / INTENTS
 # =========================
 intents = discord.Intents.default()
+# ใช้ prefix command (!) จำเป็นต้องเปิด message_content intent ทั้งในโค้ดและใน Dev Portal
+intents.message_content = True
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # =========================
@@ -236,14 +239,11 @@ class ReviewView(discord.ui.View):
 
     @discord.ui.button(label="รีเฟรชคะแนน", style=discord.ButtonStyle.secondary, emoji="🔄")
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # กัน Interaction Failed เพราะมี call ไป Supabase
         await interaction.response.defer()
         try:
             embed = await make_embed(self.admin_id, interaction.guild)
-            # แก้ไข "ข้อความเดิม" ให้เป็นคะแนนล่าสุด
             await interaction.message.edit(embed=embed, view=self)
         except Exception as e:
-            # ถ้าแก้ไม่ได้ ให้แจ้งแบบไม่รกห้อง
             try:
                 await interaction.followup.send(f"❌ รีเฟรชไม่สำเร็จ: {e}", ephemeral=True)
             except Exception:
@@ -255,46 +255,70 @@ class StarSelectView(discord.ui.View):
         self.add_item(StarSelect(admin_id, category))
 
 # =========================
-# COMMANDS
+# PREFIX COMMAND (ADMIN ONLY)
 # =========================
-@bot.tree.command(name="rate", description="ให้ดาวแอดมิน (แนบรูปได้)")
-@app_commands.describe(
-    admin="เลือกแอดมิน",
-    image="แนบรูปแอดมิน (ไม่ใส่ก็ได้)"
-)
-async def rate(interaction: discord.Interaction, admin: discord.Member, image: Optional[discord.Attachment] = None):
-    # กัน Interaction Failed
-    await interaction.response.defer(thinking=True)
+@bot.command(name="setupreview")
+@commands.has_guild_permissions(administrator=True)
+async def setupreview(ctx: commands.Context, admin: discord.Member = None):
+    """
+    Admin ใช้คำสั่งนี้เพื่อ "โพสต์การ์ดรีวิว" ลงห้อง (บอทส่งเอง = ไม่โชว์ว่าใครใช้คำสั่ง)
+    ใช้: !setupreview @Admin
+    แนบรูปได้โดยการแนบไฟล์รูปไปพร้อมข้อความคำสั่ง (optional)
+    """
+    if not ctx.guild:
+        return
+
+    # ลบข้อความคำสั่งทิ้ง (กันคนเห็นว่าใครพิมพ์) ถ้าบอทมีสิทธิ์
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
+    if admin is None:
+        return await ctx.send("วิธีใช้: `!setupreview @Admin`", delete_after=10)
+
+    # ถ้ามีไฟล์แนบรูปในข้อความคำสั่ง → ตั้งเป็น custom_image
+    image_url = None
+    if ctx.message.attachments:
+        att = ctx.message.attachments[0]
+        if att.content_type and att.content_type.startswith("image/"):
+            image_url = att.url
 
     try:
         ensure_admin(admin.id)
+        if image_url:
+            set_admin_image(admin.id, image_url)
 
-        # แนบรูปเพื่อใช้แทน avatar ได้
-        if image:
-            if image.content_type and not image.content_type.startswith("image/"):
-                return await interaction.followup.send("แนบได้เฉพาะไฟล์รูปเท่านั้นนะฟุ 🖼️", ephemeral=True)
-            set_admin_image(admin.id, image.url)
-
-        embed = await make_embed(admin.id, interaction.guild)
-        await interaction.followup.send(embed=embed, view=ReviewView(admin.id))
+        embed = await make_embed(admin.id, ctx.guild)
+        await ctx.channel.send(embed=embed, view=ReviewView(admin.id))
     except Exception as e:
-        await interaction.followup.send(f"❌ ทำรายการไม่สำเร็จ: {e}", ephemeral=True)
+        await ctx.channel.send(f"❌ setupreview ไม่สำเร็จ: {e}")
 
-@bot.tree.command(name="adminscore", description="ดูคะแนนแอดมิน")
-@app_commands.describe(admin="เลือกแอดมิน")
-async def adminscore(interaction: discord.Interaction, admin: discord.Member):
-    await interaction.response.defer(ephemeral=True, thinking=True)
+@setupreview.error
+async def setupreview_error(ctx: commands.Context, error: Exception):
+    # ถ้าไม่ใช่แอดมิน
+    if isinstance(error, commands.MissingPermissions):
+        try:
+            await ctx.message.delete()
+        except Exception:
+            pass
+        return
     try:
-        embed = await make_embed(admin.id, interaction.guild)
-        await interaction.followup.send(embed=embed, ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ ทำรายการไม่สำเร็จ: {e}", ephemeral=True)
+        await ctx.channel.send(f"❌ Error: {error}")
+    except Exception:
+        pass
+
+# =========================
+# (OPTIONAL) SLASH COMMANDS: ปิดทิ้งเพื่อไม่ให้มีป้าย "ใช้แล้ว /rate"
+# ถ้าฟุไม่อยากมี /rate ในระบบเลย ให้ปล่อยว่างไว้แบบนี้
+# =========================
 
 # =========================
 # READY
 # =========================
 @bot.event
 async def on_ready():
+    # เราไม่จำเป็นต้อง sync slash แล้ว แต่เผื่อมีคำสั่งอื่นในอนาคต
     try:
         await bot.tree.sync()
     except Exception as ex:
