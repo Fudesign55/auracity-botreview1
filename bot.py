@@ -28,6 +28,9 @@ sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 # BOT
 # =========================
 intents = discord.Intents.default()
+intents.message_content = True  # ✅ กัน warning + เผื่อใช้คำสั่ง !
+intents.members = True          # ✅ ช่วยเรื่อง member cache (แนะนำให้เปิดใน Portal ด้วย)
+
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # =========================
@@ -67,7 +70,6 @@ def get_custom_image(admin_id: int) -> Optional[str]:
     return None
 
 def upsert_rating(admin_id: int, rater_id: int, service: int, solving: int, communication: int):
-    # ✅ FIX duplicate key: ระบุ on_conflict ให้ update ทับ
     sb.table("ratings").upsert(
         {
             "admin_id": str(admin_id),
@@ -114,22 +116,16 @@ def stars(v: float) -> str:
     return "⭐" * n if n > 0 else "—"
 
 async def resolve_admin_display(guild: Optional[discord.Guild], admin_id: int) -> Tuple[str, Optional[str]]:
-    """
-    คืนค่า (display_name, avatar_url_from_discord_or_none)
-    """
     if guild:
         m = guild.get_member(admin_id)
         if m:
             return m.display_name, str(m.display_avatar.url)
-
-        # ลอง fetch_member เผื่อไม่อยู่ใน cache
         try:
             m2 = await guild.fetch_member(admin_id)
             return m2.display_name, str(m2.display_avatar.url)
         except Exception:
             pass
 
-    # fallback ไป fetch_user
     try:
         u = await bot.fetch_user(admin_id)
         name = u.name
@@ -163,7 +159,6 @@ async def make_embed(admin_id: int, guild: Optional[discord.Guild]) -> discord.E
     stats = fetch_stats(admin_id)
     name, discord_avatar = await resolve_admin_display(guild, admin_id)
 
-    # ถ้ามีรูป custom ใน Supabase ให้ใช้ก่อน
     custom = get_custom_image(admin_id)
     thumb = custom or discord_avatar
 
@@ -183,11 +178,14 @@ class CategorySelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
+        # ✅ กัน interaction fail (เผื่อเครื่องช้า/DB หน่วง)
+        await interaction.response.defer(ephemeral=True, thinking=False)
+
         key = (self.admin_id, interaction.user.id)
         drafts[key] = drafts.get(key) or RatingDraft()
 
         cat = self.values[0]
-        await interaction.response.send_message(
+        await interaction.followup.send(
             f"เลือกจำนวนดาวสำหรับ **{CATEGORIES[cat]}** (1–5)",
             view=StarSelectView(self.admin_id, cat),
             ephemeral=True
@@ -205,7 +203,6 @@ class StarSelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        # กัน Interaction Failed
         await interaction.response.defer(ephemeral=True, thinking=True)
 
         if interaction.user.id == self.admin_id:
@@ -236,14 +233,11 @@ class ReviewView(discord.ui.View):
 
     @discord.ui.button(label="รีเฟรชคะแนน", style=discord.ButtonStyle.secondary, emoji="🔄")
     async def refresh(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # กัน Interaction Failed เพราะมี call ไป Supabase
-        await interaction.response.defer()
+        await interaction.response.defer()  # ✅ กัน 10062
         try:
             embed = await make_embed(self.admin_id, interaction.guild)
-            # แก้ไข "ข้อความเดิม" ให้เป็นคะแนนล่าสุด
             await interaction.message.edit(embed=embed, view=self)
         except Exception as e:
-            # ถ้าแก้ไม่ได้ ให้แจ้งแบบไม่รกห้อง
             try:
                 await interaction.followup.send(f"❌ รีเฟรชไม่สำเร็จ: {e}", ephemeral=True)
             except Exception:
@@ -258,21 +252,15 @@ class StarSelectView(discord.ui.View):
 # COMMANDS
 # =========================
 @bot.tree.command(name="rate", description="ให้ดาวแอดมิน (แนบรูปได้)")
-@app_commands.describe(
-    admin="เลือกแอดมิน",
-    image="แนบรูปแอดมิน (ไม่ใส่ก็ได้)"
-)
+@app_commands.describe(admin="เลือกแอดมิน", image="แนบรูปแอดมิน (ไม่ใส่ก็ได้)")
 async def rate(interaction: discord.Interaction, admin: discord.Member, image: Optional[discord.Attachment] = None):
-    # กัน Interaction Failed
     await interaction.response.defer(thinking=True)
-
     try:
         ensure_admin(admin.id)
 
-        # แนบรูปเพื่อใช้แทน avatar ได้
         if image:
             if image.content_type and not image.content_type.startswith("image/"):
-                return await interaction.followup.send("แนบได้เฉพาะไฟล์รูปเท่านั้นนะฟุ 🖼️", ephemeral=True)
+                return await interaction.followup.send("แนบได้เฉพาะไฟล์รูปเท่านั้นนะ 🖼️", ephemeral=True)
             set_admin_image(admin.id, image.url)
 
         embed = await make_embed(admin.id, interaction.guild)
