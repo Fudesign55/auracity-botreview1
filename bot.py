@@ -1,9 +1,13 @@
+# aura_admin_review_bot.py
+# ✅ วางทับทั้งไฟล์ได้เลย
+# เป้าหมาย: เอา "ใช้แล้ว /rate" ออก -> เลิกใช้ Slash command (/rate) แล้วใช้ Prefix command (!rate) แทน
+# NOTE: Discord ไม่สามารถซ่อน "ใช้แล้ว /rate" ได้ถ้ายังใช้ Slash command
+
 import os
 from dataclasses import dataclass
 from typing import Optional, Dict, Tuple
 
 import discord
-from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 from supabase import create_client, Client
@@ -28,8 +32,8 @@ sb: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 # BOT
 # =========================
 intents = discord.Intents.default()
-intents.message_content = True  # ✅ กัน warning + เผื่อใช้คำสั่ง !
-intents.members = True          # ✅ ช่วยเรื่อง member cache (แนะนำให้เปิดใน Portal ด้วย)
+intents.message_content = True  # ✅ ใช้ !rate / !adminscore
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
@@ -178,7 +182,7 @@ class CategorySelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        # ✅ กัน interaction fail (เผื่อเครื่องช้า/DB หน่วง)
+        # ✅ กัน interaction fail
         await interaction.response.defer(ephemeral=True, thinking=False)
 
         key = (self.admin_id, interaction.user.id)
@@ -249,45 +253,50 @@ class StarSelectView(discord.ui.View):
         self.add_item(StarSelect(admin_id, category))
 
 # =========================
-# COMMANDS
+# COMMANDS (PREFIX) ✅ ไม่มี "ใช้แล้ว /rate"
 # =========================
-@bot.tree.command(name="rate", description="ให้ดาวแอดมิน (แนบรูปได้)")
-@app_commands.describe(admin="เลือกแอดมิน", image="แนบรูปแอดมิน (ไม่ใส่ก็ได้)")
-async def rate(interaction: discord.Interaction, admin: discord.Member, image: Optional[discord.Attachment] = None):
-    await interaction.response.defer(thinking=True)
+@bot.command(name="rate")
+async def rate_cmd(ctx: commands.Context, admin: discord.Member):
+    # ลบข้อความคำสั่งเพื่อลดรก (ต้องมีสิทธิ์ Manage Messages)
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
+    image: Optional[discord.Attachment] = ctx.message.attachments[0] if ctx.message.attachments else None
+
     try:
         ensure_admin(admin.id)
 
         if image:
             if image.content_type and not image.content_type.startswith("image/"):
-                return await interaction.followup.send("แนบได้เฉพาะไฟล์รูปเท่านั้นนะ 🖼️", ephemeral=True)
+                return await ctx.send("แนบได้เฉพาะไฟล์รูปเท่านั้นนะ 🖼️", delete_after=8)
             set_admin_image(admin.id, image.url)
 
-        embed = await make_embed(admin.id, interaction.guild)
-        await interaction.followup.send(embed=embed, view=ReviewView(admin.id))
-    except Exception as e:
-        await interaction.followup.send(f"❌ ทำรายการไม่สำเร็จ: {e}", ephemeral=True)
+        embed = await make_embed(admin.id, ctx.guild)
+        await ctx.send(embed=embed, view=ReviewView(admin.id))
 
-@bot.tree.command(name="adminscore", description="ดูคะแนนแอดมิน")
-@app_commands.describe(admin="เลือกแอดมิน")
-async def adminscore(interaction: discord.Interaction, admin: discord.Member):
-    await interaction.response.defer(ephemeral=True, thinking=True)
-    try:
-        embed = await make_embed(admin.id, interaction.guild)
-        await interaction.followup.send(embed=embed, ephemeral=True)
     except Exception as e:
-        await interaction.followup.send(f"❌ ทำรายการไม่สำเร็จ: {e}", ephemeral=True)
+        await ctx.send(f"❌ ทำรายการไม่สำเร็จ: {e}")
+
+@bot.command(name="adminscore")
+async def adminscore_cmd(ctx: commands.Context, admin: discord.Member):
+    try:
+        await ctx.message.delete()
+    except Exception:
+        pass
+
+    try:
+        embed = await make_embed(admin.id, ctx.guild)
+        await ctx.send(embed=embed)
+    except Exception as e:
+        await ctx.send(f"❌ ทำรายการไม่สำเร็จ: {e}")
 
 # =========================
 # READY
 # =========================
 @bot.event
 async def on_ready():
-    try:
-        await bot.tree.sync()
-    except Exception as ex:
-        print("Sync error:", ex)
-
     print(f"✅ Bot Online: {bot.user}")
 
 # =========================
